@@ -33,7 +33,7 @@ Una volta definito il modello concettuale tramite diagramma ER, si è passati al
 
 Il codice che segue rappresenta quindi la concretizzazione operativa del modello ER: ogni scelta sintattica e strutturale è finalizzata a preservare i vincoli concettuali, garantire coerenza dei dati e supportare query efficienti.
 
-#### Creazione del DataBase e delle Tabelle
+#### Creazione del DataBase, delle Tabelle e dei Trigger
 ```sql
 CREATE DATABASE IF NOT EXISTS db_alberghiero;
 USE db_alberghiero;
@@ -130,6 +130,7 @@ Così com'è programmato (`ON UPDATE CASCADE`), se il codice di un hotel dovesse
 `FOREIGN KEY (id_tipologia)` collega la camera alla sua tipologia. `ON DELETE RESTRICT` impedisce ad un operatore di rimuovere una categoria (es. Suite) fino a quando c'è almeno una camera collegata ad essa. Questo impedisce che le camere rimangano improvvisamente prive di una categoria e di un prezzo associato.
 
 La fase di popolamento della tabella `Camera` sfrutta una strategia che delega al motore SQL la generazione controllata dei dati. Per ottenere esattamente cento camere, lo script utilizza una sottoquery — indicata con l’alias `seq` — che interroga la vista di sistema `information_schema.columns` non per ricavarne informazioni strutturali, ma come puro generatore di righe. Combinando questa entità con una variabile inizializzata a zero, si ottiene una sequenza numerica progressiva (`n`), limitata a cento elementi tramite `LIMIT 100`. Tale sequenza costituisce l’ossatura logica su cui costruire gli attributi dell’entità debole `Camera`.
+
 Il valore di `n` viene dapprima interpretato dal costrutto `CASE`, che suddivide l’intervallo in cinque gruppi da venti unità, assegnando ciascun blocco a un diverso hotel. Questa scelta riflette il vincolo concettuale secondo cui le camere dipendono dall’hotel e consente di distribuire in modo uniforme le unità tra le strutture. Successivamente, il numero di camera viene ricostruito come identificatore parziale che riparte da 1 per ogni hotel: la funzione `LPAD` garantisce una formattazione coerente a tre cifre, migliorando leggibilità e ordinamento. Per introdurre variabilità realistica, lo script impiega una combinazione di `RAND`, `FLOOR` ed `ELT`. `RAND` genera un valore casuale continuo, trasformato in un intero compreso tra 1 e 3 tramite `FLOOR`; questo indice viene poi utilizzato da `ELT` per selezionare una tipologia o uno stato da un insieme predefinito. In questo modo, la casualità rimane confinata entro un dominio controllato, evitando l’inserimento di valori non ammessi e rispettando i vincoli di integrità.
 Nel complesso, questa architettura consente di ottenere un popolamento coerente, vario e pienamente aderente al modello concettuale, senza ricorrere a script esterni o procedure iterative. La logica è interamente demandata al database, che garantisce prestazioni elevate e un controllo rigoroso sui vincoli referenziali e di dominio.
 
@@ -165,6 +166,7 @@ FROM (
 ) AS seq;
 ```
 Il telefono è l'unico attributo descrittivo che non presenta il vincolo `NOT NULL`. Logicamente, un utente potrebbe effettuare una prenotazione online inserendo solo l'email. L'aggiunta del vincolo `UNIQUE` sull'email garantisce un'importante regola di pulizia del database: non possono esistere due profili clienti differenti con la stessa identica casella postale. Evita la proliferazione di account duplicati.
+
 Sfruttando lo stesso motore sequenziale basato sul conteggio delle colonne di sistema, si è popolata la tabella con 60 clienti fittizzi. `CONCAT(LOWER(...), '.', LOWER(...), n, '@example.com')` costruisce dinamicamente un indirizzo email realistico e formalmente valido, combinando il nome e il cognome estratti, convertiti in minuscolo tramite `LOWER`, e aggiungendo il valore incrementale n per garantire matematicamente il rispetto del vincolo di univocità (`UNIQUE`) precedentemente dichiarato.
 
 ```sql
@@ -260,9 +262,9 @@ JOIN (
 ) AS c
 ON 1=1;
 ```
-SPIEGA QUI.
+`CONCAT('P', SUBSTRING(UUID(), 1, 8))` genera una chiave alfanumerica univoca per ogni prenotazione estraendo i primi 8 caratteri da un identificativo generato casualmente tramite algoritmo `UUID()`. Questo approccio imita i codici di prenotazione reali usati dalle compagnie aeree e dalle agenzie di viaggio. `DATE_ADD('2026-01-01', ...)` sposta le date di arrivo e partenza in avanti nel corso di tutto l'anno 2026 usando la variabile di sessione `@arr`. Garantisce matematicamente che la data di partenza superi quella di arrivo di un valore variabile da 1 a 7 notti, rispettando pienamente il vincolo `CHECK`. `0 AS importo_totale` inserisce temporaneamente il valore 0 poichè, seguendo l'ottimizzazione architetturale corretta, lo script presuppone che a questo punto sia stato attivato nel database il trigger `trg_calcola_importo_totale`. Il trigger intercetta questa `INSERT`, calcola la durata del soggiorno in notti e sovrascrive istantaneamente lo zero calcolando l'importo corretto in modo automatico. `JOIN ... ON 1=1` è un'istruzione di Cross Join: moltiplica la sequenza di 250 cicli per le camere estratte casualmente tramite `ORDER BY RAND()`, generando così una vasta mole di record storici.
 
-Si procede poi a visualizzare le prima 20 righe di tutte le tabelle.
+Si procede infine a visualizzare le prima 20 righe di tutte le tabelle.
 ```sql
 SELECT * FROM Hotel LIMIT 20;
 SELECT * FROM Camera LIMIT 20;
@@ -270,18 +272,104 @@ SELECT * FROM Cliente LIMIT 20;
 SELECT * FROM Prenotazione LIMIT 20;
 SELECT * FROM Tipologia;
 ```
+Successivamente, si è pensato di inserire un ulteriore trigger per evitare che si effettui una prenotazione per una camera che risutla già occupata. Questo è stato implementato in questa fase come scelta strategica poiché risponde alla necessità metodologica legata alla gestione dei dati di test. La query di inserimento analizzata in precedenza genera in modo casuale 250 prenotazioni distribuite nell'arco di un anno per 100 camere. Trattandosi di un algoritmo basato sulla casualità pura delle date, la probabilità matematica che si verifichino sovrapposizioni temporali tra le prenotazioni destinate alla stessa camera è pressoché del 100%.
 
-### Query A: Clienti Top Spenders
-Questa analisi individua i clienti che hanno generato il maggior fatturato per la catena.
+Se il trigger venisse attivato prima dell'esecuzione di questo inserimento di massa, intercetterebbe la primissima sovrapposizione casuale e interromperebbe immediatamente lo script, lasciando il database privo dei dati necessari per i successivi test. Pertanto, è meglio effettuare prima il caricamento del dataset storico e solo successivamente registrare il trigger nel catalogo. In questo modo, l'oggetto entra in funzione come un "guardiano" in tempo reale esclusivamente per le transazioni operative future. Questo trigger è utile e strategico poiché in questo modo la gestione dell'overbooking è affidata direttamente al motore SQL, quindi nessuna prenotazione può essere effettuata se non rispetta il vincolo, indipendentemente da chi esegue l'`INSERT`. Inoltre, traduce operativamente quanto detto nel diagramma ER, ovvero che una camera non può avere più prenotazioni contemporaneamente. 
+
+```sql
+USE db_alberghiero;
+
+DELIMITER $$
+
+CREATE TRIGGER trg_no_overlapping_reservations
+BEFORE INSERT ON Prenotazione
+FOR EACH ROW
+BEGIN
+    IF EXISTS (
+        SELECT 1
+        FROM Prenotazione p
+        WHERE 
+            p.hotel_codice = NEW.hotel_codice
+            AND p.camera_numero = NEW.camera_numero
+            AND p.stato_prenotazione NOT IN ('Cancellata', 'No-Show')
+            AND (
+                NEW.data_arrivo < p.data_partenza
+                AND NEW.data_partenza > p.data_arrivo
+            )
+    ) THEN
+        SIGNAL SQLSTATE '45000' 
+		SET MESSAGE_TEXT = 'Errore: La camera selezionata è già occupata in quelle date.';
+    END IF;
+END$$
+
+DELIMITER ;
+```
+`DELIMITER $$` cambia il delimitatore dei comandi da `;` a `$$`, così MySQL può interpretare l’intero blocco `BEGIN…END` come un’unica istruzione, non spezzata dai `;` interni. `IF EXISTS (...)` verifica se esiste almeno una prenotazione già registrata che entra in conflitto con quella nuova. `p.stato_prenotazione NOT IN ('Cancellata', 'No-Show')` esclude dal controllo le prenotazioni che non occupano realmente la camera; è una scelta logica: solo le prenotazioni attive o concluse ma effettivamente svolte devono impedire nuove prenotazioni sulle stesse date. Se esiste almeno una prenotazione che soddisfa queste condizioni e quelle sulle date, `IF EXISTS` risulta vero e si entra nel blocco `THEN`. `SIGNAL SQLSTATE '45000'` genera un errore personalizzato e interrompe l’operazione di inserimento. `SET MESSAGE_TEXT = '...'` imposta il messaggio di errore che verrà restituito al client; in questo caso, comunica chiaramente che la camera è già occupata nelle date indicate.
+
+#### Query effettuate
+Una volta costruito il modello concettuale, tradotto in schema logico‑relazionale e popolato il database con dati coerenti, si è deciso di creare una serie di query per estrarre conoscenza, verificare la correttezza del modello e, soprattutto, simulare le reali esigenze gestionali di una struttura alberghiera. In particolare:
+* alcune interrogazioni permettono di valutare la capacità ricettiva e la distribuzione delle camere (es. numero totale di camere per hotel, camere disponibili in un intervallo di date);
+* altre misurano la domanda effettiva, individuando gli hotel più prenotati, le camere più richieste e i periodi di maggiore attività;
+* altre ancora analizzano il comportamento dei clienti, identificando quelli più attivi o più redditizi, oppure quelli che generano più cancellazioni;
+* un gruppo di query è dedicato alla performance economica, con calcoli di fatturato totale, fatturato per hotel, andamento mensile e impatto economico delle cancellazioni;
+* infine, alcune interrogazioni svolgono un ruolo di controllo e diagnostica, come l’individuazione di prenotazioni sovrapposte o situazioni di potenziale overbooking.
+
+Ciascuna query verrà analizzata nel dettaglio, evidenziando: quale domanda gestionale risolve, quale logica implementa, quali informazioni restituisce e come tali informazioni possono essere utilizzate in un contesto reale.
+
+
+La prima query mira ad ottenere la lista degli hotel con il numero totale di camere associate a ciascuno. È una delle prime informazioni che un gestore o un analista vorrebbe conoscere per capire la capacità ricettiva del gruppo alberghiero.
+```sql
+SELECT 
+    h.codice AS hotel_codice,
+    h.denominazione   AS hotel_nome,
+    COUNT(c.numero) AS totale_camere
+FROM Hotel h
+LEFT JOIN Camera c
+    ON c.hotel_codice = h.codice
+GROUP BY h.codice, h.denominazione
+ORDER BY totale_camere DESC;
+```
+`SELECT` definisce le colonne da restituire nel risultato. `COUNT(c.numero) AS totale_camere` conta quante righe di `Camera` sono associate a ciascun hotel; poiché ogni riga rappresenta una camera, il conteggio restituisce il numero totale di camere per hotel. `LEFT JOIN` collega la tabella `Camera` (`c`) alla tabella `Hotel` (`h`), mantenendo tutti gli hotel anche se non hanno camere associate; questo è importante in fase di analisi e di test del modello: un hotel con `totale_camere = 0` segnala un’anomalia o una fase di configurazione incompleta. `ON c.hotel_codice = h.codice` specifica la condizione di join: una camera è associata a un hotel quando il suo hotel_codice coincide con il codice dell’hotel. `GROUP BY h.codice, h.denominazione` raggruppa le righe per hotel e, infine con `ORDER BY totale_camere DESC` si ordina il risultato in ordine decrescente.
+
+Per ogni hotel, la query fornisce: il codice identificativo (`hotel_codice`), utile per riferimenti tecnici; il nome dell’hotel (`hotel_nome`), utile per i report; il numero totale di camere (totale_camere), che quantifica la capacità fisica della struttura. Queste informazioni sono utili per capire quali hotel hanno maggiore capacità e quindi possono assorbire più domanda in alta stagione, valutare se la distribuzione delle camere tra le strutture è equilibrata rispetto alla domanda attesa, individuare rapidamente eventuali errori di popolamento.
+
+La seconda query vuole calcolare quali hotel ricevono più prenotazioni. È una metrica chiave per valutare la domanda, la popolarità e la performance commerciale delle strutture.
 
 ```sql
 SELECT 
-    c.codice_cliente,
-    c.nome,
-    c.cognome,
-    SUM(p.importo_totale) AS totale_speso
+    h.codice AS hotel_codice,
+    h.denominazione   AS hotel_nome,
+    COUNT(p.id_prenotazione) AS numero_prenotazioni
 FROM Prenotazione p
-JOIN Cliente c ON c.codice_cliente = p.cliente_codice
-WHERE p.stato_prenotazione IN ('Completata', 'In corso')
-GROUP BY c.codice_cliente, c.nome, c.cognome
-ORDER BY totale_speso DESC;
+JOIN Hotel h
+    ON h.codice = p.hotel_codice
+GROUP BY h.codice, h.denominazione
+ORDER BY numero_prenotazioni DESC;
+```
+`JOIN` collega ogni prenotazione al relativo hotel. `ON h.codice = p.hotel_codice` associa ogni prenotazione all’hotel a cui appartiene. Essendo un `JOIN` (non `LEFT JOIN`), gli hotel senza prenotazioni non compariranno nel risultato; infatti, la query vuole analizzare solo gli hotel che hanno ricevuto almeno una prenotazione.
+
+Per ogni hotel, la query fornisce: il codice identificativo (`hotel_codice`), il nome dell’hotel (`hotel_nome`) e il numero totale di prenotazioni (`numero_prenotazioni`). Questi dati permettono di confrontare rapidamente le strutture.
+
+Questa query permette di individuare strutture con bassa domanda che potrebbero necessitare interventi, effettuare una pianificazione operativa e prendere decisioni strategiche sugli investimenti da compiere.
+
+SPIEGA QUI QUERY
+```sql
+SELECT
+    h.codice AS hotel_codice,
+    h.denominazione   AS hotel_nome,
+    SUM(DATEDIFF(p.data_partenza, p.data_arrivo)) AS notti_prenotate,
+    COUNT(DISTINCT c.hotel_codice, c.numero)      AS numero_camere,
+    SUM(DATEDIFF(p.data_partenza, p.data_arrivo)) 
+        / NULLIF(COUNT(DISTINCT c.hotel_codice, c.numero), 0) AS notti_medie_per_camera
+FROM Prenotazione p
+JOIN Hotel h
+    ON h.codice = p.hotel_codice
+JOIN Camera c
+    ON c.hotel_codice = p.hotel_codice AND c.numero = p.camera_numero
+GROUP BY h.codice, h.denominazione;
+```
+SPIEGA QUI CODICE
+
+
+
+
