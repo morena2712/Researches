@@ -589,7 +589,7 @@ L’espressione `stato_prenotazione IN ('Cancellata', 'No-Show') ` restituisce 1
 Questo è un valore importante per valutare l'affidabilità della domanda e valutare le politiche di cancellazione. Il tasso di cancellazione è essenziale per decidere se applicare overbooking controllato o definire politiche di cancellazione più rigide. Questo risultato può essere confrontato con le cancellazioni in hotel diversi e con quali clienti effettuano più cancellazioni.
 
 In questo senso sono state pensate le query successive.
-```
+```sql
 -- Cancellazioni per hotel
 SELECT 
     h.codice AS hotel_codice,
